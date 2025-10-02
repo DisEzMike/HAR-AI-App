@@ -61,8 +61,8 @@ flutter:
 
   # To add assets to your application, add an assets section, like this:
   assets:
-    - assets/rf_4cls.onnx
-    - assets/rf_4cls.meta.json
+    - assets/rf_5cls_clean.onnx
+    - assets/rf_5cls_clean.meta.json
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

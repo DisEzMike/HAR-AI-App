@@ -12,8 +12,8 @@ class OnnxStairsClassifier {
   bool _isInitialized = false;
 
   Future<void> init({
-    String onnxAsset = 'assets/rf_4cls.onnx',
-    String metaAsset = 'assets/rf_4cls.meta.json',
+    String onnxAsset = 'assets/rf_5cls_clean.onnx',
+    String metaAsset = 'assets/rf_5cls_clean.meta.json',
   }) async {
     if (_isInitialized) return;
     
