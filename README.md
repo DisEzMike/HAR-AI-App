@@ -1,4 +1,4 @@
-# aihar
+# HAR-AI-App
 
 A new Flutter project.
 
