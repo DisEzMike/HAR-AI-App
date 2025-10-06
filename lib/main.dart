@@ -1,28 +1,31 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'feature_extractor.dart';
-import 'onnx_classifier.dart';
+import 'tflite_classifier.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
 }
 
-// ===== Engine: รับ sample → window → features → ONNX → callback =====
 typedef PredictCb = void Function(String label, double conf);
 
 class LiveEngine {
-  final FeatureExtractor extractor = FeatureExtractor();
-  final OnnxStairsClassifier clf;
-  final Duration win = const Duration(seconds: 3);
-  final Duration hop = const Duration(milliseconds: 1500);
+  final TensorFlowLiteClassifier clf;
+  final extractor = FeatureExtractor();
+  final Duration win = const Duration(seconds: 2);
+  final Duration hop = const Duration(milliseconds: 1000);
   final int smoothK = 3;
 
   final List<ImuSample> _buf = [];
   final List<String> _lastLabels = [];
   DateTime? _lastInferAt;
   final PredictCb onPrediction;
+  
+  // สำหรับเก็บข้อมูล CSV (time series)
+  final List<String> _csvData = [];
 
   LiveEngine(this.clf, {required this.onPrediction});
 
@@ -31,11 +34,10 @@ class LiveEngine {
     double ax,
     double ay,
     double az,
-    double gx,
-    double gy,
-    double gz,
+    // Removed gyroscope parameters - accelerometer only according to mobile_config
   ) async {
-    _buf.add(ImuSample(t, ax, ay, az, gx, gy, gz));
+    // ใช้เฉพาะ accelerometer data เท่านั้น (ตาม mobile_config: accelerometer_only)
+    _buf.add(ImuSample(t, ax, ay, az));
 
     final cutoff = t.subtract(win + const Duration(seconds: 1));
     while (_buf.isNotEmpty && _buf.first.t.isBefore(cutoff)) {
@@ -43,10 +45,6 @@ class LiveEngine {
     }
 
     if (_lastInferAt == null || t.difference(_lastInferAt!) >= hop) {
-      // print('=== TRIGGERING INFERENCE ===');
-      // print('Buffer size: ${_buf.length}');
-      // print('Win: ${win.inSeconds}s, Hop: ${hop.inMilliseconds}ms');
-      // print('Time since last inference: ${_lastInferAt == null ? "never" : t.difference(_lastInferAt!).inMilliseconds}ms');
       _lastInferAt = t;
       await _inferIfReady();
     }
@@ -61,21 +59,84 @@ class LiveEngine {
         .where((s) => !s.t.isBefore(start) && !s.t.isAfter(latest))
         .toList();
         
-    if (w.length < 16) return;
+    if (w.length < 100) return; // ต้องมีอย่างน้อย 100 samples สำหรับ CNN [100, 4]
 
-    final feats = extractor.computeFeatures(w);
-    final fv = clf.toFeatureVector(feats);
-    final res = await clf.predictVector(fv);
-    print((fv));
+    print('=== CNN INFERENCE DEBUG (3 Classes - Accelerometer Only) ===');
+    print('Window size: ${w.length} samples');
+    print('Time range: ${start.millisecondsSinceEpoch} - ${latest.millisecondsSinceEpoch}');
+    print('Duration: ${latest.difference(start).inMilliseconds}ms');
 
-    final conf = (res["conf"] as double);
-    String label = (res["label"] as String);
-    if (conf < 0.55) label = "UNKNOWN";
+    // แปลง sensor data เป็น Map format สำหรับ feature extractor
+    final sensorDataMaps = w.map((sample) => {
+      'ax': sample.ax,
+      'ay': sample.ay,
+      'az': sample.az,
+    }).toList();
+
+    // เตรียม time series data สำหรับ CNN [100, 4] - Accelerometer + magnitude only
+    final timeSeriesData = FeatureExtractor.prepareTimeSeriesData(sensorDataMaps);
+    print('Time series shape: [${timeSeriesData.length}, ${timeSeriesData.first.length}]');
+    print('Features: [ax=${timeSeriesData.first[0].toStringAsFixed(3)}, ay=${timeSeriesData.first[1].toStringAsFixed(3)}, az=${timeSeriesData.first[2].toStringAsFixed(3)}, mag=${timeSeriesData.first[3].toStringAsFixed(3)}]');
+    
+    final res = await clf.predictTimeSeries(timeSeriesData);
+    print('Raw prediction result: $res');
+
+    // Use correct keys from the classifier response
+    final conf = (res["confidence"] as double);
+    String label = (res["class"] as String);
+    
+    // Handle both Map<String, double> (mock) and List<double> (real model) formats
+    final dynamic probsData = res["probabilities"];
+    List<double> probs;
+    
+    if (probsData is Map<String, double>) {
+      // Mock prediction format: cS removed)
+      final newClasses = ['IDLE', 'RUN', 'WALK'];
+      probs = newClasses.map((cls) => probsData[cls] ?? 0.0).toList();
+    } else {
+      // Real model format: already a List<double>
+      probs = probsData as List<double>;
+    }
+    
+    // แสดง probabilities ทุก class (ใช้ 3 classes ใหม่ - STAIRS removed)
+    print('=== ALL CLASS PROBABILITIES (3 Classes) ===');
+    final newClasses = ['IDLE', 'RUN', 'WALK'];
+    for (int i = 0; i < newClasses.length && i < probs.length; i++) {
+      print('${newClasses[i]}: ${(probs[i] * 100).toStringAsFixed(2)}%');
+    }
+    print('=====================================');
+    
+    if (conf < 0.30) label = "UNKNOWN";
+
+    // เก็บข้อมูลลง CSV
+    _saveToCSV(timeSeriesData, label);
 
     _lastLabels.add(label);
     if (_lastLabels.length > smoothK) _lastLabels.removeAt(0);
     final maj = _majority(_lastLabels);
     onPrediction(maj, conf);
+  }
+
+  void _saveToCSV(List<List<double>> timeSeriesData, String label) {
+    final timestamp = DateTime.now().toIso8601String();
+    // Simple CSV format for debugging
+    final csvLine = '$timestamp,$label,${timeSeriesData.length}';
+    _csvData.add(csvLine);
+  }
+
+  String getCSVData() {
+    if (_csvData.isEmpty) return '';
+    // เพิ่ม header เป็นบรรทัดแรก
+    final header = 'timestamp,predicted_label,sample_count';
+    // แสดงเฉพาะ 20 samples ล่าสุด
+    final last20 = _csvData.length > 20 
+        ? _csvData.sublist(_csvData.length - 20) 
+        : _csvData;
+    return '$header\n${last20.join('\n')}';
+  }
+  
+  void clearCSVData() {
+    _csvData.clear();
   }
 
   String _majority(List<String> xs) {
@@ -101,7 +162,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'IMU Stairs Classifier',
+      title: 'HAR AI',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
       home: const HomePage(),
       debugShowCheckedModeBanner: false,
@@ -116,18 +177,18 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final OnnxStairsClassifier _clf = OnnxStairsClassifier();
+  TensorFlowLiteClassifier? _clf;
   LiveEngine? _engine;
 
   bool _modelReady = false;
   bool _running = false;
   String _label = "—";
   double _conf = 0.0;
-
+  final double fs = 50.0; // Sampling rate 50Hz
   StreamSubscription<AccelerometerEvent>? _accSub;
-  StreamSubscription<GyroscopeEvent>? _gyroSub;
+  // Removed gyroscope subscription - accelerometer only
   Timer? _tick;
-  double? _ax, _ay, _az, _gx, _gy, _gz;
+  double? _ax, _ay, _az; // Removed gyroscope variables
 
   @override
   void initState() {
@@ -136,13 +197,21 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _initModel() async {
+    setState(() {
+      _label = "🔄 Loading AI model...";
+    });
+    
     try {
-      await _clf.init(
-        onnxAsset: 'assets/rf_4cls.onnx',
-        metaAsset: 'assets/rf_4cls.meta.json',
+      print('📱 Starting optimized model initialization...');
+      // Use optimized singleton pattern for faster loading
+      _clf = await TensorFlowLiteClassifier.getInstance(
+        modelAsset: 'assets/cnn_har.tflite',
+        configAsset: 'assets/mobile_config_corrected.json',
       );
+      
+      print('🚀 Creating inference engine...');
       _engine = LiveEngine(
-        _clf,
+        _clf!,
         onPrediction: (lab, conf) {
           if (!_running) return;
           setState(() {
@@ -151,12 +220,18 @@ class _HomePageState extends State<HomePage> {
           });
         },
       );
+      
       setState(() {
         _modelReady = true;
+        _label = "✅ Model ready! Tap START to begin";
       });
+      print('✅ Model initialization completed successfully');
+      
     } catch (e) {
+      print('❌ Model initialization failed: $e');
       setState(() {
-        _label = "Model load error: $e";
+        _label = "❌ Model loading failed";
+        _modelReady = false;
       });
     }
   }
@@ -169,15 +244,11 @@ class _HomePageState extends State<HomePage> {
       _ay = e.y.toDouble();
       _az = e.z.toDouble();
     });
-    _gyroSub = gyroscopeEventStream().listen((e) {
-      _gx = e.x.toDouble();
-      _gy = e.y.toDouble();
-      _gz = e.z.toDouble();
-    });
-    _tick = Timer.periodic(const Duration(milliseconds: 20), (_) async {
+    // Removed gyroscope stream - accelerometer only according to mobile_config
+    _tick = Timer.periodic(Duration(milliseconds: (1000 / fs).toInt()), (_) async {
       final ax = _ax ?? 0.0, ay = _ay ?? 0.0, az = _az ?? 0.0;
-      final gx = _gx ?? 0.0, gy = _gy ?? 0.0, gz = _gz ?? 0.0;
-      await _engine?.addSample(DateTime.now(), ax, ay, az, gx, gy, gz);
+      // Removed gyroscope data - accelerometer only
+      await _engine?.addSample(DateTime.now(), ax, ay, az);
     });
     setState(() {
       _running = true;
@@ -189,8 +260,7 @@ class _HomePageState extends State<HomePage> {
   void _stop() {
     _accSub?.cancel();
     _accSub = null;
-    _gyroSub?.cancel();
-    _gyroSub = null;
+    // Removed gyroscope cleanup - accelerometer only
     _tick?.cancel();
     _tick = null;
     setState(() {
@@ -198,20 +268,64 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Future<void> _exportCSV() async {
+    if (_engine == null) return;
+    
+    final csvData = _engine!.getCSVData();
+    if (csvData.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ไม่มีข้อมูลให้ export')),
+      );
+      return;
+    }
+
+    // แสดง dialog พร้อม CSV data ที่สามารถ copy ได้
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Export CSV Data'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            csvData,
+            style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: csvData));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('คัดลอกไปยังคลิปบอร์ดแล้ว')),
+              );
+            },
+            child: const Text('คัดลอก'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('ปิด'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _clearData() async {
+    _engine?.clearCSVData();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('ล้างข้อมูลเรียบร้อย')),
+    );
+  }
+
   @override
   void dispose() {
     _stop();
-    _clf.dispose(); // Clean up ONNX resources
+    _clf?.dispose(); // Clean up ONNX resources
     super.dispose();
   }
 
-  // ฟังก์ชันแปลงป้ายกำกับเป็นภาษาไทย
+  // ฟังก์ชันแปลงป้ายกำกับเป็นภาษาไทย (อัพเดตสำหรับ 3 classes - STAIRS removed)
   String _getDisplayLabel(String label) {
     switch (label) {
-      case "DOWNSTAIRS":
-        return "ลงบันได";
-      case "UPSTAIRS":
-        return "ขึ้นบันได";
       case "WALK":
         return "เดิน";
       case "RUN":
@@ -225,13 +339,9 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // ฟังก์ชันเลือกสีตามป้ายกำกับ
+  // ฟังก์ชันเลือกสีตามป้ายกำกับ (อัพเดตสำหรับ 3 classes - STAIRS removed)
   Color _getLabelColor(String label) {
     switch (label) {
-      case "DOWNSTAIRS":
-        return Colors.blue;
-      case "UPSTAIRS":
-        return Colors.green;
       case "WALK":
         return Colors.orange;
       case "RUN":
@@ -266,7 +376,43 @@ class _HomePageState extends State<HomePage> {
     final canPress = _modelReady && !_running;
     
     return Scaffold(
-      appBar: AppBar(title: const Text('Stairs Classifier')),
+      appBar: AppBar(
+        title: const Text('HAR AI'),
+        actions: [
+          if (_modelReady)
+            PopupMenuButton<String>(
+              onSelected: (value) {
+                if (value == 'export') {
+                  _exportCSV();
+                } else if (value == 'clear') {
+                  _clearData();
+                }
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: 'export',
+                  child: Row(
+                    children: [
+                      Icon(Icons.file_download),
+                      SizedBox(width: 8),
+                      Text('Export CSV'),
+                    ],
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'clear',
+                  child: Row(
+                    children: [
+                      Icon(Icons.delete),
+                      SizedBox(width: 8),
+                      Text('ล้างข้อมูล'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -287,7 +433,7 @@ class _HomePageState extends State<HomePage> {
               _running
                   ? _getDisplayLabel(_label)
                   : (_modelReady ? "กด START เพื่อเริ่ม" : "กำลังโหลดโมเดล..."),
-              key: ValueKey('${_running}_${_label}_${_conf}'), // Force rebuild
+              key: ValueKey('${_running}_${_label}_$_conf'), // Force rebuild
               style: TextStyle(
                 fontSize: 28, 
                 fontWeight: FontWeight.bold,
@@ -320,11 +466,10 @@ class _HomePageState extends State<HomePage> {
                 runSpacing: 4,
                 alignment: WrapAlignment.center,
                 children: [
-                  _buildClassChip("DOWNSTAIRS", "ลงบันได", Colors.blue),
-                  _buildClassChip("UPSTAIRS", "ขึ้นบันได", Colors.green),
-                  _buildClassChip("WALK", "เดิน", Colors.orange),
-                  _buildClassChip("RUN", "วิ่ง", Colors.red),
+                  // Updated for 3 classes only - STAIRS removed
                   _buildClassChip("IDLE", "อยู่นิ่ง", Colors.grey),
+                  _buildClassChip("RUN", "วิ่ง", Colors.red),
+                  _buildClassChip("WALK", "เดิน", Colors.orange),
                 ],
               ),
             ],

@@ -1,0 +1,59 @@
+{
+  "window_size": 100,
+  "sampling_rate": 50,
+  "step_size": 50,
+  "overlap_seconds": 1.0,
+  "window_duration_seconds": 2.0,
+  "required_sensors": [
+    "accelerometer"
+  ],
+  "optional_sensors": [],
+  "removed_sensors": [
+    "gyroscope",
+    "magnetometer"
+  ],
+  "features": [
+    "accelerometer_x",
+    "accelerometer_y",
+    "accelerometer_z",
+    "accelerometer_magnitude"
+  ],
+  "feature_engineering": {
+    "raw_accelerometer": 3,
+    "magnitude_features": 1,
+    "total_features": 4
+  },
+  "normalization": {
+    "method": "standard_scaler",
+    "per_feature": true,
+    "fit_on_training": true,
+    "scaler_parameters": {
+      "feature_names": [
+        "ax",
+        "ay",
+        "az",
+        "acc_magnitude"
+      ],
+      "mean": [
+        -0.18200116482123732,
+        6.141968012738515,
+        -3.1081432506977946,
+        11.779727640266291
+      ],
+      "scale": [
+        5.189256966259507,
+        8.711534803600445,
+        5.96693030459829,
+        6.861410236798096
+      ],
+      "var": [
+        26.928387861872828,
+        75.89083863434183,
+        35.60425725993345,
+        47.07895043763771
+      ],
+      "formula": "(x - mean) / scale",
+      "inverse_formula": "(x * scale) + mean"
+    }
+  }
+}

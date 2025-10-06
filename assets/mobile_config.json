@@ -1,0 +1,148 @@
+{
+  "model_info": {
+    "input_shape": [
+      100,
+      4
+    ],
+    "output_classes": 3,
+    "sensor_focus": "accelerometer_only",
+    "classes": [
+      "IDLE",
+      "RUN",
+      "WALK"
+    ],
+    "class_encoding": {
+      "IDLE": 0,
+      "RUN": 1,
+      "WALK": 2
+    }
+  },
+  "preprocessing": {
+    "window_size": 100,
+    "sampling_rate": 50,
+    "step_size": 50,
+    "overlap_seconds": 1.0,
+    "window_duration_seconds": 2.0,
+    "required_sensors": [
+      "accelerometer"
+    ],
+    "optional_sensors": [],
+    "removed_sensors": [
+      "gyroscope",
+      "magnetometer"
+    ],
+    "features": [
+      "accelerometer_x",
+      "accelerometer_y",
+      "accelerometer_z",
+      "accelerometer_magnitude"
+    ],
+    "feature_engineering": {
+      "raw_accelerometer": 3,
+      "magnitude_features": 1,
+      "total_features": 4
+    },
+    "normalization": {
+      "method": "standard_scaler",
+      "per_feature": true,
+      "fit_on_training": true,
+      "scaler_parameters": {
+        "feature_names": [
+          "ax",
+          "ay",
+          "az",
+          "acc_magnitude"
+        ],
+        "mean": [
+          -0.18200116482123732,
+          6.141968012738515,
+          -3.1081432506977946,
+          11.779727640266291
+        ],
+        "scale": [
+          5.189256966259507,
+          8.711534803600445,
+          5.96693030459829,
+          6.861410236798096
+        ],
+        "var": [
+          26.928387861872828,
+          75.89083863434183,
+          35.60425725993345,
+          47.07895043763771
+        ],
+        "formula": "(x - mean) / scale",
+        "inverse_formula": "(x * scale) + mean"
+      }
+    }
+  },
+  "model_architecture": {
+    "type": "CNN",
+    "input_shape": [
+      100,
+      4
+    ],
+    "conv_layers": 4,
+    "filters": [
+      64,
+      128,
+      256,
+      128
+    ],
+    "kernel_sizes": [
+      3,
+      3,
+      3,
+      3
+    ],
+    "pooling": "MaxPooling1D",
+    "global_pooling": "GlobalAveragePooling1D",
+    "dense_layers": [
+      256,
+      128
+    ],
+    "dropout_rates": [
+      0.2,
+      0.2,
+      0.3,
+      0.3,
+      0.4,
+      0.4
+    ],
+    "activation": "relu",
+    "output_activation": "softmax",
+    "output_units": 3
+  },
+  "deployment": {
+    "platforms": [
+      "android",
+      "ios",
+      "web"
+    ],
+    "model_formats": [
+      "tflite",
+      "onnx"
+    ],
+    "optimization": "float16",
+    "target_size_mb": "<5MB",
+    "inference_time_ms": "<50ms"
+  },
+  "preprocessing_config": {
+    "description": "Enhanced preprocessing configuration for mobile deployment",
+    "scaler_usage": "Apply before feeding data to model",
+    "feature_order": [
+      "ax",
+      "ay",
+      "az",
+      "acc_magnitude"
+    ],
+    "data_flow": [
+      "1. Collect accelerometer data (ax, ay, az)",
+      "2. Calculate magnitude: sqrt(ax² + ay² + az²)",
+      "3. Create window of 100 timesteps",
+      "4. Apply StandardScaler normalization",
+      "5. Feed to CNN model",
+      "6. Get class probabilities"
+    ]
+  }
+}

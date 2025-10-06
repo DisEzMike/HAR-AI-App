@@ -1,30 +1,44 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// This is a basic Flutter widget test for HAR AI app.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:aihar/main.dart';
+import 'package:har_ai/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
+  testWidgets('HAR AI app loads without error', (WidgetTester tester) async {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const MyApp());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    // Verify that the app title is present in AppBar
+    expect(find.text('HAR AI'), findsOneWidget);
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+    // Verify that the loading text is present initially
+    expect(find.text('กำลังโหลดโมเดล...'), findsOneWidget);
+
+    // Verify that start button is present
+    expect(find.byType(ElevatedButton), findsOneWidget);
+  });
+
+  testWidgets('Start/Stop button toggles', (WidgetTester tester) async {
+    // Build our app
+    await tester.pumpWidget(const MyApp());
+
+    // Wait for model loading (mock)
+    await tester.pump(const Duration(seconds: 1));
+
+    // Find the start button
+    final startButton = find.byType(ElevatedButton);
+    expect(startButton, findsOneWidget);
+
+    // Initially should show "START"
+    expect(find.text('START'), findsOneWidget);
+
+    // Tap to start
+    await tester.tap(startButton);
     await tester.pump();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Should now show "Stop" button
+    expect(find.text('Stop'), findsOneWidget);
   });
 }
