@@ -60,14 +60,14 @@ class LiveEngine {
         .toList();
     
     // Fast IDLE Detection: ตรวจสอบด่วนก่อนทำ CNN inference
-    if (w.length >= 50) { // ใช้ข้อมูล 50 samples แรกเพื่อ quick check
-      final recentSamples = w.length > 50 ? w.sublist(w.length - 50) : w;
+    if (w.length >= 100) { // ใช้ข้อมูล 100 samples แรกเพื่อ quick check
+      final recentSamples = w.length > 100 ? w.sublist(w.length - 100) : w;
       final idleResult = _checkIdleWithConfidence(recentSamples);
       if (idleResult['isIdle'] == true) {
         final dynamicConfidence = idleResult['confidence'] as double;
         print('🚀 Fast IDLE detected (${recentSamples.length} samples) - Dynamic confidence: ${(dynamicConfidence*100).toStringAsFixed(1)}%');
         _processQuickPrediction("IDLE", dynamicConfidence);
-        return;
+        // return;
       }
     }
         
@@ -270,7 +270,7 @@ class _HomePageState extends State<HomePage> {
   bool _modelReady = false;
   bool _running = false;
   String _label = "—";
-  double _conf = 0.0;
+  double _conf = 0.0000;
   final double fs = 50.0; // Sampling rate 50Hz
   StreamSubscription<AccelerometerEvent>? _accSub;
   // Removed gyroscope subscription - accelerometer only
@@ -301,9 +301,9 @@ class _HomePageState extends State<HomePage> {
         _clf!,
         onPrediction: (lab, conf) {
           if (!_running) return;
-          setState(() {
+            setState(() {
             _label = lab;
-            _conf = conf;
+            _conf = double.parse(conf.toStringAsFixed(4));
           });
         },
       );
