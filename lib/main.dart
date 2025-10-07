@@ -16,8 +16,8 @@ class LiveEngine {
   final TensorFlowLiteClassifier clf;
   final extractor = FeatureExtractor();
   final Duration win = const Duration(seconds: 2);
-  final Duration hop = const Duration(milliseconds: 1000);
-  final int smoothK = 3;
+  final Duration hop = const Duration(milliseconds: 500); // เร็วขึ้น: ทุก 0.5 วินาที
+  final int smoothK = 2; // ลดการ smooth ลง: จาก 3 เป็น 2
 
   final List<ImuSample> _buf = [];
   final List<String> _lastLabels = [];
@@ -58,10 +58,22 @@ class LiveEngine {
     final w = _buf
         .where((s) => !s.t.isBefore(start) && !s.t.isAfter(latest))
         .toList();
+    
+    // Fast IDLE Detection: ตรวจสอบด่วนก่อนทำ CNN inference
+    if (w.length >= 50) { // ใช้ข้อมูล 50 samples แรกเพื่อ quick check
+      final recentSamples = w.length > 50 ? w.sublist(w.length - 50) : w;
+      final idleResult = _checkIdleWithConfidence(recentSamples);
+      if (idleResult['isIdle'] == true) {
+        final dynamicConfidence = idleResult['confidence'] as double;
+        print('🚀 Fast IDLE detected (${recentSamples.length} samples) - Dynamic confidence: ${(dynamicConfidence*100).toStringAsFixed(1)}%');
+        _processQuickPrediction("IDLE", dynamicConfidence);
+        return;
+      }
+    }
         
     if (w.length < 100) return; // ต้องมีอย่างน้อย 100 samples สำหรับ CNN [100, 4]
 
-    print('=== CNN INFERENCE DEBUG (3 Classes - Accelerometer Only) ===');
+    print('=== CNN INFERENCE DEBUG (4 Classes - Enhanced) ===');
     print('Window size: ${w.length} samples');
     print('Time range: ${start.millisecondsSinceEpoch} - ${latest.millisecondsSinceEpoch}');
     print('Duration: ${latest.difference(start).inMilliseconds}ms');
@@ -98,15 +110,31 @@ class LiveEngine {
       probs = probsData as List<double>;
     }
     
-    // แสดง probabilities ทุก class (ใช้ 3 classes ใหม่ - STAIRS removed)
-    print('=== ALL CLASS PROBABILITIES (3 Classes) ===');
+    // แสดง probabilities ทุก class (ใช้ 4 classes ใหม่)
+    print('=== ALL CLASS PROBABILITIES ===');
     final newClasses = ['IDLE', 'RUN', 'WALK'];
     for (int i = 0; i < newClasses.length && i < probs.length; i++) {
       print('${newClasses[i]}: ${(probs[i] * 100).toStringAsFixed(2)}%');
     }
-    print('=====================================');
+    print('==============================');
     
-    if (conf < 0.30) label = "UNKNOWN";
+    // Dynamic confidence threshold - ปรับตามสถานการณ์และความเชื่อมั่น
+    double confidenceThreshold = 0.30;
+    if (label == "IDLE") {
+      // Dynamic IDLE threshold ขึ้นอยู่กับ confidence level
+      if (conf >= 0.90) {
+        confidenceThreshold = 0.60; // ความเชื่อมั่นสูงมาก -> threshold ต่ำ
+      } else if (conf >= 0.80) {
+        confidenceThreshold = 0.70; // ความเชื่อมั่นสูง -> threshold ปานกลาง
+      } else if (conf >= 0.70) {
+        confidenceThreshold = 0.80; // ความเชื่อมั่นปานกลาง -> threshold สูง
+      } else {
+        confidenceThreshold = 0.85; // ความเชื่อมั่นต่ำ -> threshold สูงสุด
+      }
+      print('🎯 Dynamic IDLE threshold: ${confidenceThreshold} (conf: ${(conf*100).toStringAsFixed(1)}%)');
+    }
+    
+    if (conf < confidenceThreshold) label = "UNKNOWN";
 
     // เก็บข้อมูลลง CSV
     _saveToCSV(timeSeriesData, label);
@@ -137,6 +165,65 @@ class LiveEngine {
   
   void clearCSVData() {
     _csvData.clear();
+  }
+
+  /// Dynamic IDLE Detection - ตรวจสอบ IDLE พร้อม dynamic confidence
+  Map<String, dynamic> _checkIdleWithConfidence(List<ImuSample> samples) {
+    if (samples.length < 10) return {'isIdle': false, 'confidence': 0.0};
+    
+    // คำนวณ variance ของ accelerometer ใน 3 แกน
+    final axValues = samples.map((s) => s.ax).toList();
+    final ayValues = samples.map((s) => s.ay).toList();
+    final azValues = samples.map((s) => s.az).toList();
+    
+    final axVariance = _calculateVariance(axValues);
+    final ayVariance = _calculateVariance(ayValues);
+    final azVariance = _calculateVariance(azValues);
+    
+    // ถ้า variance ต่ำในทุกแกน = IDLE
+    const idleThreshold = 0.5;
+    final isIdle = axVariance < idleThreshold && 
+                   ayVariance < idleThreshold && 
+                   azVariance < idleThreshold;
+    
+    if (!isIdle) return {'isIdle': false, 'confidence': 0.0};
+    
+    // คำนวณ dynamic confidence ตาม variance level
+    final avgVariance = (axVariance + ayVariance + azVariance) / 3;
+    double confidence;
+    
+    if (avgVariance < 0.1) {
+      confidence = 0.95; // variance ต่ำมาก -> confidence สูงมาก
+    } else if (avgVariance < 0.2) {
+      confidence = 0.90; // variance ต่ำ -> confidence สูง
+    } else if (avgVariance < 0.3) {
+      confidence = 0.85; // variance ปานกลาง -> confidence ปานกลาง
+    } else {
+      confidence = 0.75; // variance ใกล้ threshold -> confidence ต่ำ
+    }
+    
+    print('📊 Dynamic variance check: ax=${axVariance.toStringAsFixed(3)}, ay=${ayVariance.toStringAsFixed(3)}, az=${azVariance.toStringAsFixed(3)} (avg=${avgVariance.toStringAsFixed(3)}) -> IDLE @ ${(confidence*100).toStringAsFixed(1)}%');
+    
+    return {'isIdle': true, 'confidence': confidence};
+  }
+
+  /// คำนวณ variance ของ data
+  double _calculateVariance(List<double> data) {
+    if (data.isEmpty) return 0.0;
+    
+    final mean = data.reduce((a, b) => a + b) / data.length;
+    final squaredDiffs = data.map((x) => (x - mean) * (x - mean));
+    return squaredDiffs.reduce((a, b) => a + b) / data.length;
+  }
+
+  /// ประมวลผล quick prediction โดยไม่ต้องผ่าน CNN
+  void _processQuickPrediction(String label, double confidence) {
+    print('⚡ Quick prediction: $label (${(confidence * 100).toStringAsFixed(1)}%)');
+    
+    _lastLabels.add(label);
+    if (_lastLabels.length > smoothK) _lastLabels.removeAt(0);
+    final maj = _majority(_lastLabels);
+    onPrediction(maj, confidence);
   }
 
   String _majority(List<String> xs) {
